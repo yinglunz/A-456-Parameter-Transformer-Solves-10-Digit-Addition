@@ -1,0 +1,42 @@
+{
+  "42": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "100": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "200": {
+    "exact_match": 0.9999,
+    "token_accuracy": 0.999990909090909
+  },
+  "300": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "400": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "500": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "999": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "1234": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "7777": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  },
+  "31415": {
+    "exact_match": 1.0,
+    "token_accuracy": 1.0
+  }
+}
