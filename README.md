@@ -1,6 +1,10 @@
 # A 456-Parameter Transformer Solves 10-Digit Addition
 
-A **456-parameter** transformer that achieves **100% exact-match accuracy** on 100,000 test examples for 10-digit integer addition.
+A **456-parameter** transformer that solves 10-digit integer addition. Given two integers A, B in [0, 10^10), the model predicts C = A + B autoregressively, achieving **100% exact-match accuracy** on 100,000 test examples.
+
+Building on [smallest-addition-transformer-codex](https://github.com/anadim/smallest-addition-transformer-codex) (1,644 params) and [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax) (777 params), we introduce **low-rank factorization** (W = AB, rank 3) to reduce the model to 512 parameters. [digit-addition-491p](https://github.com/rezabyt/digit-addition-491p) then replaced LayerNorm with **RMSNorm w/o bias** to reach 491 parameters. We build on this and add two further techniques to reach **456 parameters**:
+- **Shared-A tied-KV QKV**: Ties the key and value projection matrices (Bk = Bv), reducing QKV from 84 to 63 parameters (saves 21).
+- **Rank-2 attention output**: Attention output projection reduced from rank 3 to rank 2 (saves 14 parameters).
 
 ## Results
 
@@ -31,9 +35,6 @@ Single-layer, single-head, decoder-only transformer with d_model=7, d_ff=14, voc
 | Output head | (tied with token embedding) | 0 |
 | **Total** | | **456** |
 
-Building on [smallest-addition-transformer-codex](https://github.com/anadim/smallest-addition-transformer-codex) (1,644 params) and [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax) (777 params), we introduce **low-rank factorization** (W = AB, rank 3) to reduce the model to 512 parameters. [digit-addition-491p](https://github.com/rezabyt/digit-addition-491p) then replaced LayerNorm with **RMSNorm** to reach 491 parameters. We build on this and add two further techniques to reach **456 parameters**:
-- **Shared-A tied-KV QKV** (`shareA_tieKV`): Shared bottleneck matrix with tied K=V projection (saves 21 parameters)
-- **Rank-2 attention output**: Attention output projection reduced from rank 3 to rank 2 (saves 14 parameters)
 
 ## Leaderboard
 
