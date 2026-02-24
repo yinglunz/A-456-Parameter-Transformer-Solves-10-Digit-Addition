@@ -3,7 +3,7 @@
 A **456-parameter** transformer that solves 10-digit integer addition. Given two integers A, B in [0, 10^10), the model predicts C = A + B autoregressively, achieving **100% exact-match accuracy** on 100,000 test examples.
 
 Building on [smallest-addition-transformer-codex](https://github.com/anadim/smallest-addition-transformer-codex) (1,644 params) and [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax) (777 params), we introduce **low-rank factorization** (W = AB, rank 3) to reduce the model to 512 parameters. [digit-addition-491p](https://github.com/rezabyt/digit-addition-491p) then replaced LayerNorm with **RMSNorm w/o bias** to reach 491 parameters. We build on this and add two further techniques to reach **456 parameters**:
-- **Shared-A tied-KV QKV**: Ties the key and value projection matrices (Bk = Bv), reducing QKV from 84 to 63 parameters (saves 21).
+- **Shared-A tied-KV QKV**: In the low-rank QKV factorization (Q, K, V = h·Bq, h·Bk, h·Bv where h = x·A), we tie Bk = Bv so that K = V, reducing from 3 B-matrices to 2 (saves 21 parameters).
 - **Rank-2 attention output**: Attention output projection reduced from rank 3 to rank 2 (saves 14 parameters).
 
 ## Results
@@ -43,7 +43,7 @@ Single-layer, single-head, decoder-only transformer with d_model=7, d_ff=14, voc
 | 1,644 | Codex baseline | 99.04% | [Papailiopoulos](https://github.com/anadim/smallest-addition-transformer-codex) |
 | 777 | gpt-acc-jax (pico-7d-ff14-lr02) | 99.69% | [Havinga](https://github.com/yhavinga/gpt-acc-jax) |
 | 512 | + Low-rank factorization (rank 3) | 99.988% | Ours |
-| 491 | + RMSNorm | 99.97% | [rezabyt](https://github.com/rezabyt/digit-addition-491p) |
+| 491 | + RMSNorm w/o bias | 99.97% | [rezabyt](https://github.com/rezabyt/digit-addition-491p) |
 | **456** | **+ shareA_tieKV + rank-2 attn output** | **100%** | **Ours** |
 
 ## Grokking
