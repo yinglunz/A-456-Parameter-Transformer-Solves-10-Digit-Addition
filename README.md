@@ -6,16 +6,24 @@ Building on [smallest-addition-transformer-codex](https://github.com/anadim/smal
 - **Shared-A tied-KV QKV**: In the low-rank QKV factorization (Q, K, V = h·Bq, h·Bk, h·Bv where h = x·A), we tie Bk = Bv so that K = V, reducing from 3 B-matrices to 2 (saves 21 parameters).
 - **Rank-2 attention output**: Attention output projection reduced from rank 3 to rank 2 (saves 14 parameters).
 
-## Results
 
-Evaluated on 10 independent test sets of 10,000 examples each (100,000 total), with seeds disjoint from training:
 
-| Model | Params | Exact Match | Errors / 100K |
+## Grokking
+
+All successful models exhibit **grokking**: prolonged near-zero accuracy followed by a sudden phase transition.
+
+![Grokking curves](results/grokking_plot.png)
+
+
+## Leaderboard
+
+| Params | Model | Accuracy | Reference |
 |---|---|---|---|
-| 582p (seed 42) | 582 | 99.999% | 1 |
-| 512p (seed 42) | 512 | 99.988% | 12 |
-| **456p (seed 43)** | **456** | **100%** | **0** |
-| 456p (seed 44) | 456 | 99.958% | 42 |
+| 1,644 | Codex baseline | 99.04% | [Papailiopoulos](https://github.com/anadim/smallest-addition-transformer-codex) |
+| 777 | gpt-acc-jax (pico-7d-ff14-lr02) | 99.69% | [Havinga](https://github.com/yhavinga/gpt-acc-jax) |
+| 512 | + Low-rank factorization (rank 3) | 99.988% | Ours |
+| 491 | + RMSNorm w/o bias | 99.97% | [rezabyt](https://github.com/rezabyt/digit-addition-491p) |
+| **456** | **+ shareA_tieKV + rank-2 attn output** | **100%** | **Ours** |
 
 ## Architecture
 
@@ -35,22 +43,18 @@ Single-layer, single-head, decoder-only transformer with d_model=7, d_ff=14, voc
 | Output head | (tied with token embedding) | 0 |
 | **Total** | | **456** |
 
+## Results
 
-## Leaderboard
+Evaluated on 10 independent test sets of 10,000 examples each (100,000 total), with seeds disjoint from training:
 
-| Params | Model | Accuracy | Reference |
+| Model | Params | Exact Match | Errors / 100K |
 |---|---|---|---|
-| 1,644 | Codex baseline | 99.04% | [Papailiopoulos](https://github.com/anadim/smallest-addition-transformer-codex) |
-| 777 | gpt-acc-jax (pico-7d-ff14-lr02) | 99.69% | [Havinga](https://github.com/yhavinga/gpt-acc-jax) |
-| 512 | + Low-rank factorization (rank 3) | 99.988% | Ours |
-| 491 | + RMSNorm w/o bias | 99.97% | [rezabyt](https://github.com/rezabyt/digit-addition-491p) |
-| **456** | **+ shareA_tieKV + rank-2 attn output** | **100%** | **Ours** |
+| 582p (seed 42) | 582 | 99.999% | 1 |
+| 512p (seed 42) | 512 | 99.988% | 12 |
+| **456p (seed 43)** | **456** | **100%** | **0** |
+| 456p (seed 44) | 456 | 99.958% | 42 |
 
-## Grokking
 
-All successful models exhibit **grokking**: prolonged near-zero accuracy followed by a sudden phase transition.
-
-![Grokking curves](results/grokking_plot.png)
 
 ## Quick Start
 
