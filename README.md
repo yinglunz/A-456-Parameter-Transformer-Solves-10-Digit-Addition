@@ -56,7 +56,7 @@ All successful models exhibit **grokking**: prolonged near-zero accuracy followe
 ### Install
 
 ```bash
-pip install torch
+pip install torch==2.10.0
 ```
 
 ### Evaluate Pre-trained Checkpoint
