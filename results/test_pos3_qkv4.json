@@ -1,7 +1,0 @@
-{
-  "checkpoint": "results/runs/lowrank_pos3_qkv4/checkpoints/best.pt",
-  "test_size": 10000,
-  "exact_match": 1.0,
-  "token_accuracy": 1.0,
-  "failure_samples": []
-}

@@ -28,6 +28,8 @@ class ModelConfig:
     qkv_rank: int = 0
     attn_out_rank: int = 0
     ffn_rank: int = 0       # 0 = full rank FFN
+    use_rmsnorm: bool = False   # True = RMSNorm (no bias), False = LayerNorm
+    tie_qkv: str = "none"      # "none","all","qk","kv","shareA","shareB","shareB_tieQK","shareB_tieKV","shareA_tieKV","shareA_tieQK"
 
 
 # ---------------------------------------------------------------------------
@@ -64,21 +66,133 @@ class LowRankEmbedding(nn.Module):
         return F.embedding(idx, self.A) @ self.B
 
 
+class RMSNorm(nn.Module):
+    """Root Mean Square normalization (weight only, no bias).
+
+    Saves d_model params per instance vs LayerNorm by removing bias.
+    """
+
+    def __init__(self, d_model: int, eps: float = 1e-8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d_model))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return x / rms * self.weight
+
+
 # ---------------------------------------------------------------------------
 # Attention
 # ---------------------------------------------------------------------------
 class CausalSelfAttention(nn.Module):
     def __init__(self, d_model: int, n_head: int, max_seq_len: int,
-                 qkv_rank: int = 0, attn_out_rank: int = 0):
+                 qkv_rank: int = 0, attn_out_rank: int = 0,
+                 tie_qkv: str = "none"):
         super().__init__()
         assert d_model % n_head == 0
         self.n_head = n_head
         self.head_dim = d_model // n_head
+        self.tie_qkv = tie_qkv
 
-        if qkv_rank > 0:
-            self.qkv = LowRankLinear(d_model, 3 * d_model, qkv_rank)
+        if tie_qkv == "all":
+            # Single shared projection: Q=K=V=Wx
+            if qkv_rank > 0:
+                self.qkv_shared = LowRankLinear(d_model, d_model, qkv_rank)
+            else:
+                self.qkv_shared = nn.Linear(d_model, d_model, bias=False)
+        elif tie_qkv == "qk":
+            # Shared Q=K, separate V
+            if qkv_rank > 0:
+                self.qk_shared = LowRankLinear(d_model, d_model, qkv_rank)
+                self.v_proj = LowRankLinear(d_model, d_model, qkv_rank)
+            else:
+                self.qk_shared = nn.Linear(d_model, d_model, bias=False)
+                self.v_proj = nn.Linear(d_model, d_model, bias=False)
+        elif tie_qkv == "kv":
+            # Separate Q, shared K=V
+            if qkv_rank > 0:
+                self.q_proj = LowRankLinear(d_model, d_model, qkv_rank)
+                self.kv_shared = LowRankLinear(d_model, d_model, qkv_rank)
+            else:
+                self.q_proj = nn.Linear(d_model, d_model, bias=False)
+                self.kv_shared = nn.Linear(d_model, d_model, bias=False)
+        elif tie_qkv == "shareA":
+            # Q,K,V share matrix A but have separate B matrices
+            # x @ A_shared @ B_q, x @ A_shared @ B_k, x @ A_shared @ B_v
+            assert qkv_rank > 0, "shareA requires qkv_rank > 0"
+            self.qkv_A = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_Bq = nn.Parameter(torch.empty(qkv_rank, d_model))
+            self.qkv_Bk = nn.Parameter(torch.empty(qkv_rank, d_model))
+            self.qkv_Bv = nn.Parameter(torch.empty(qkv_rank, d_model))
+            std_a = math.sqrt(2.0 / (d_model + qkv_rank))
+            std_b = math.sqrt(2.0 / (qkv_rank + d_model))
+            nn.init.normal_(self.qkv_A, std=std_a)
+            nn.init.normal_(self.qkv_Bq, std=std_b)
+            nn.init.normal_(self.qkv_Bk, std=std_b)
+            nn.init.normal_(self.qkv_Bv, std=std_b)
+        elif tie_qkv == "shareB":
+            # Q,K,V have separate A matrices but share B
+            assert qkv_rank > 0, "shareB requires qkv_rank > 0"
+            self.qkv_Aq = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_Ak = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_Av = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_B = nn.Parameter(torch.empty(qkv_rank, d_model))
+            std_a = math.sqrt(2.0 / (d_model + qkv_rank))
+            std_b = math.sqrt(2.0 / (qkv_rank + d_model))
+            nn.init.normal_(self.qkv_Aq, std=std_a)
+            nn.init.normal_(self.qkv_Ak, std=std_a)
+            nn.init.normal_(self.qkv_Av, std=std_a)
+            nn.init.normal_(self.qkv_B, std=std_b)
+        elif tie_qkv == "shareB_tieQK":
+            # Share B + tie A for Q=K: Aqk(shared), Av(separate), B(shared)
+            assert qkv_rank > 0, "shareB_tieQK requires qkv_rank > 0"
+            self.qkv_Aqk = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_Av = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_B = nn.Parameter(torch.empty(qkv_rank, d_model))
+            std_a = math.sqrt(2.0 / (d_model + qkv_rank))
+            std_b = math.sqrt(2.0 / (qkv_rank + d_model))
+            nn.init.normal_(self.qkv_Aqk, std=std_a)
+            nn.init.normal_(self.qkv_Av, std=std_a)
+            nn.init.normal_(self.qkv_B, std=std_b)
+        elif tie_qkv == "shareB_tieKV":
+            # Share B + tie A for K=V: Aq(separate), Akv(shared), B(shared)
+            assert qkv_rank > 0, "shareB_tieKV requires qkv_rank > 0"
+            self.qkv_Aq = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_Akv = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_B = nn.Parameter(torch.empty(qkv_rank, d_model))
+            std_a = math.sqrt(2.0 / (d_model + qkv_rank))
+            std_b = math.sqrt(2.0 / (qkv_rank + d_model))
+            nn.init.normal_(self.qkv_Aq, std=std_a)
+            nn.init.normal_(self.qkv_Akv, std=std_a)
+            nn.init.normal_(self.qkv_B, std=std_b)
+        elif tie_qkv == "shareA_tieKV":
+            # Shared A, tie B for K=V: h = x@A; Q = h@B_q; K = V = h@B_kv
+            assert qkv_rank > 0, "shareA_tieKV requires qkv_rank > 0"
+            self.qkv_A = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_Bq = nn.Parameter(torch.empty(qkv_rank, d_model))
+            self.qkv_Bkv = nn.Parameter(torch.empty(qkv_rank, d_model))
+            std_a = math.sqrt(2.0 / (d_model + qkv_rank))
+            std_b = math.sqrt(2.0 / (qkv_rank + d_model))
+            nn.init.normal_(self.qkv_A, std=std_a)
+            nn.init.normal_(self.qkv_Bq, std=std_b)
+            nn.init.normal_(self.qkv_Bkv, std=std_b)
+        elif tie_qkv == "shareA_tieQK":
+            # Shared A, tie B for Q=K: h = x@A; Q = K = h@B_qk; V = h@B_v
+            assert qkv_rank > 0, "shareA_tieQK requires qkv_rank > 0"
+            self.qkv_A = nn.Parameter(torch.empty(d_model, qkv_rank))
+            self.qkv_Bqk = nn.Parameter(torch.empty(qkv_rank, d_model))
+            self.qkv_Bv = nn.Parameter(torch.empty(qkv_rank, d_model))
+            std_a = math.sqrt(2.0 / (d_model + qkv_rank))
+            std_b = math.sqrt(2.0 / (qkv_rank + d_model))
+            nn.init.normal_(self.qkv_A, std=std_a)
+            nn.init.normal_(self.qkv_Bqk, std=std_b)
+            nn.init.normal_(self.qkv_Bv, std=std_b)
         else:
-            self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+            if qkv_rank > 0:
+                self.qkv = LowRankLinear(d_model, 3 * d_model, qkv_rank)
+            else:
+                self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
 
         if attn_out_rank > 0:
             self.proj = LowRankLinear(d_model, d_model, attn_out_rank)
@@ -90,8 +204,46 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bsz, seqlen, d = x.shape
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+
+        if self.tie_qkv == "all":
+            shared = self.qkv_shared(x)
+            q = k = v = shared
+        elif self.tie_qkv == "qk":
+            qk = self.qk_shared(x)
+            q = k = qk
+            v = self.v_proj(x)
+        elif self.tie_qkv == "kv":
+            q = self.q_proj(x)
+            kv = self.kv_shared(x)
+            k = v = kv
+        elif self.tie_qkv == "shareA":
+            h = x @ self.qkv_A  # shared bottleneck
+            q = h @ self.qkv_Bq
+            k = h @ self.qkv_Bk
+            v = h @ self.qkv_Bv
+        elif self.tie_qkv == "shareB":
+            q = (x @ self.qkv_Aq) @ self.qkv_B
+            k = (x @ self.qkv_Ak) @ self.qkv_B
+            v = (x @ self.qkv_Av) @ self.qkv_B
+        elif self.tie_qkv == "shareB_tieQK":
+            qk = (x @ self.qkv_Aqk) @ self.qkv_B
+            q = k = qk
+            v = (x @ self.qkv_Av) @ self.qkv_B
+        elif self.tie_qkv == "shareB_tieKV":
+            q = (x @ self.qkv_Aq) @ self.qkv_B
+            kv = (x @ self.qkv_Akv) @ self.qkv_B
+            k = v = kv
+        elif self.tie_qkv == "shareA_tieKV":
+            h = x @ self.qkv_A
+            q = h @ self.qkv_Bq
+            k = v = h @ self.qkv_Bkv
+        elif self.tie_qkv == "shareA_tieQK":
+            h = x @ self.qkv_A
+            q = k = h @ self.qkv_Bqk
+            v = h @ self.qkv_Bv
+        else:
+            qkv = self.qkv(x)
+            q, k, v = qkv.chunk(3, dim=-1)
 
         q = q.view(bsz, seqlen, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(bsz, seqlen, self.n_head, self.head_dim).transpose(1, 2)
@@ -128,12 +280,14 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.d_model)
+        norm_cls = RMSNorm if cfg.use_rmsnorm else nn.LayerNorm
+        self.ln1 = norm_cls(cfg.d_model)
         self.attn = CausalSelfAttention(
             cfg.d_model, cfg.n_head, cfg.max_seq_len,
             qkv_rank=cfg.qkv_rank, attn_out_rank=cfg.attn_out_rank,
+            tie_qkv=cfg.tie_qkv,
         )
-        self.ln2 = nn.LayerNorm(cfg.d_model)
+        self.ln2 = norm_cls(cfg.d_model)
         self.mlp = MLP(cfg.d_model, cfg.d_ff, ffn_rank=cfg.ffn_rank)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -160,7 +314,8 @@ class TinyDecoderLM(nn.Module):
             self.pos_emb = nn.Embedding(cfg.max_seq_len, cfg.d_model)
 
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
-        self.ln_f = nn.LayerNorm(cfg.d_model)
+        norm_cls = RMSNorm if cfg.use_rmsnorm else nn.LayerNorm
+        self.ln_f = norm_cls(cfg.d_model)
 
         # Weight-tied output head
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
@@ -179,6 +334,8 @@ class TinyDecoderLM(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
+        elif isinstance(module, RMSNorm):
+            nn.init.ones_(module.weight)
 
     def forward(
         self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None

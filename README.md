@@ -1,18 +1,55 @@
-# 512-Parameter Addition Transformer (New Record)
+# A 456-Parameter Transformer Solves 10-Digit Addition
 
-A **512-parameter** transformer that achieves **≥99.97% exact-match accuracy** on 10-digit integer addition, reducing the previous record of 777 parameters by **34.1%**.
+A **456-parameter** transformer that achieves **100% exact-match accuracy** on 100,000 test examples for 10-digit integer addition.
 
-Built on techniques from [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax) and [smallest-addition-transformer-claude-code](https://github.com/anadim/smallest-addition-transformer-claude-code).
+## Results
 
-## Key Innovation: Low-Rank Factorization
+Evaluated on 10 independent test sets of 10,000 examples each (100,000 total), with seeds disjoint from training:
 
-All major weight matrices use rank-3 factorization (`W = A @ B` where `A ∈ R^{m×3}`, `B ∈ R^{3×n}`):
-- Position embeddings: 231 → 120 params (saves 111)
-- QKV projection: 147 → 84 params (saves 63)
-- Attention output: 49 → 42 params (saves 7)
-- FFN up/down: 196 → 126 params (saves 70)
+| Model | Params | Exact Match | Errors / 100K |
+|---|---|---|---|
+| 582p (seed 42) | 582 | 99.999% | 1 |
+| 512p (seed 42) | 512 | 99.988% | 12 |
+| **456p (seed 43)** | **456** | **100%** | **0** |
+| 456p (seed 44) | 456 | 99.958% | 42 |
 
-**Surprising finding**: The low-rank constraint acts as a critical *regularizer*. The full-rank baseline (763 params) achieves 0% accuracy, while the 512-param low-rank model achieves 100%. Grokking-based training is inherently stochastic (seed-dependent), but low-rank models grok far more reliably than full-rank ones.
+## Architecture
+
+Single-layer, single-head, decoder-only transformer with d_model=7, d_ff=14, vocabulary size 14 (digits 0-9, `+`, `=`, `<PAD>`, `<EOS>`).
+
+| Component | Factorization | Params |
+|---|---|---|
+| Token embedding (tied) | 14 × 7 | 98 |
+| Position embedding (rank-3) | 33×3 + 3×7 | 120 |
+| RMSNorm (pre-attn) | weight only | 7 |
+| QKV (shareA_tieKV, r=3) | A: 7×3; Bq: 3×7; Bkv: 3×7 | 63 |
+| Attention output (r=2) | 7×2 + 2×7 | 28 |
+| RMSNorm (pre-FFN) | weight only | 7 |
+| FFN up (r=3) | 7×3 + 3×14 | 63 |
+| FFN down (r=3) | 14×3 + 3×7 | 63 |
+| Final RMSNorm | weight only | 7 |
+| Output head | (tied with token embedding) | 0 |
+| **Total** | | **456** |
+
+Building on [smallest-addition-transformer-codex](https://github.com/anadim/smallest-addition-transformer-codex) (1,644 params) and [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax) (777 params), we introduce **low-rank factorization** (W = AB, rank 3) to reduce the model to 512 parameters. [digit-addition-491p](https://github.com/rezabyt/digit-addition-491p) then replaced LayerNorm with **RMSNorm** to reach 491 parameters. We build on this and add two further techniques to reach **456 parameters**:
+- **Shared-A tied-KV QKV** (`shareA_tieKV`): Shared bottleneck matrix with tied K=V projection (saves 21 parameters)
+- **Rank-2 attention output**: Attention output projection reduced from rank 3 to rank 2 (saves 14 parameters)
+
+## Leaderboard
+
+| Params | Model | Accuracy | Reference |
+|---|---|---|---|
+| 1,644 | Codex baseline | 99.04% | [Papailiopoulos](https://github.com/anadim/smallest-addition-transformer-codex) |
+| 777 | gpt-acc-jax (pico-7d-ff14-lr02) | 99.69% | [Havinga](https://github.com/yhavinga/gpt-acc-jax) |
+| 512 | + Low-rank factorization (rank 3) | 99.988% | Ours |
+| 491 | + RMSNorm | 99.97% | [rezabyt](https://github.com/rezabyt/digit-addition-491p) |
+| **456** | **+ shareA_tieKV + rank-2 attn output** | **100%** | **Ours** |
+
+## Grokking
+
+All successful models exhibit **grokking**: prolonged near-zero accuracy followed by a sudden phase transition.
+
+![Grokking curves](results/grokking_plot.png)
 
 ## Quick Start
 
@@ -25,125 +62,65 @@ pip install torch
 ### Evaluate Pre-trained Checkpoint
 
 ```bash
-python -m src.eval test \
-  --ckpt checkpoints/best_512params.pt \
-  --device cpu --seed 42
-```
-
-Output:
-```json
-{
-  "test_size": 10000,
-  "exact_match": 1.0,
-  "token_accuracy": 1.0,
-  "failure_samples": []
-}
-```
-
-### Verify Parameter Count
-
-```python
-import torch
-from src.model import ModelConfig, TinyDecoderLM, count_parameters
-
-ckpt = torch.load("checkpoints/best_512params.pt", map_location="cpu", weights_only=False)
-cfg = ModelConfig(**ckpt["model_config"])
-model = TinyDecoderLM(cfg)
-model.load_state_dict(ckpt["model_state"])
-
-print(f"Parameters: {count_parameters(model)}")  # 512
-print(f"Tied embeddings: {model.lm_head.weight is model.token_emb.weight}")  # True
+python evaluate_checkpoints.py \
+  checkpoints/best_456p_s43.pt --device cuda
 ```
 
 ### Single Prediction
 
 ```bash
 python -m src.eval predict \
-  --ckpt checkpoints/best_512params.pt \
+  --ckpt checkpoints/best_456p_s43.pt \
   --a 1234567890 --b 9876543210
 ```
 
 ### Train from Scratch
 
 ```bash
-# 512-param record (rank-3 everything)
+# 456-param model (best: seed 43)
+python -m src.train \
+  --run-name best_456 \
+  --pos-rank 3 --qkv-rank 3 --attn-out-rank 2 --ffn-rank 3 \
+  --use-rmsnorm --tie-qkv shareA_tieKV \
+  --total-steps 54000 --device cuda --seed 43
+
+# 512-param model
 python -m src.train \
   --run-name best_512 \
   --pos-rank 3 --qkv-rank 3 --attn-out-rank 3 --ffn-rank 3 \
   --device cuda --seed 42
-
-# 582-param model (rank-3 attention only, full-rank FFN)
-python -m src.train \
-  --run-name best_582 \
-  --pos-rank 3 --qkv-rank 3 --attn-out-rank 3 \
-  --device cuda --seed 42
 ```
 
-**Note**: The 512-param model groks at step ~21K and peaks at step ~24K, but degrades after that. The best checkpoint is saved automatically. The 582-param model is more stable and maintains 100% through the end of training.
+## Training
 
-## Architecture
+3-phase curriculum following [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax):
+1. Steps 0-2,000: 1-3 digit operands
+2. Steps 2,000-7,000: 1-6 digit operands
+3. Steps 7,000-54,000: 1-10 digit operands (full range)
 
-| Component | Shape | Params |
-|---|---|---|
-| Token embedding (tied with output) | 14 × 7 | 98 |
-| Position embedding (rank-3) | 33×3 + 3×7 | 120 |
-| LayerNorm (pre-attention) | 7 + 7 | 14 |
-| QKV projection (rank-3) | 7×3 + 3×21 | 84 |
-| Attention output (rank-3) | 7×3 + 3×7 | 42 |
-| LayerNorm (pre-FFN) | 7 + 7 | 14 |
-| FFN up (rank-3, no bias) | 7×3 + 3×14 | 63 |
-| FFN down (rank-3, no bias) | 14×3 + 3×7 | 63 |
-| Final LayerNorm | 7 + 7 | 14 |
-| Output head | (tied) | 0 |
-| **Total** | | **512** |
+AdamW optimizer, peak LR = 0.02, linear warmup (1,350 steps) + cosine decay, min LR = 0.002, weight decay = 0.01, batch size = 512, total steps = 54,000.
 
-## Results
-
-Validated across 10 independent test sets (100,000 total examples):
-
-| Metric | Value |
-|---|---|
-| Parameters | **512** |
-| Test exact-match (primary, 10K) | 100.00% |
-| Test exact-match (100K aggregate) | 99.99% |
-| Total errors in 100K | 10 |
-| Previous record | 777 params |
-| Reduction | **34.1%** |
-
-## Comparison with Prior Work
-
-| Model | Params | Test Accuracy |
-|---|---|---|
-| [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax) (pico-7d-ff14) | 777 | 99.69% |
-| [gpt-acc-jax](https://github.com/yhavinga/gpt-acc-jax) (pico-1L-7d) | 973 | 100% |
-| [smallest-addition-codex](https://github.com/anadim/smallest-addition-transformer-claude-code) | 1,644 | 99.04% |
-| **Ours (582 params, r=3 attn+pos)** | **582** | **≥99.99%** |
-| **Ours (512 params, r=3 all)** | **512** | **≥99.97%** |
-
-## How It Works
-
-1. **Tokenization**: Raw digit tokenization (vocab=14) with reversed output for carry propagation alignment
-2. **Curriculum learning**: 3 phases (1-3 digits → 1-6 digits → 1-10 digits) over 27K steps
-3. **Grokking**: The model trains at ~0% accuracy for ~21K steps, then suddenly jumps to 100% — a classic grokking phenomenon amplified by the low-rank constraint
-4. **High learning rate**: LR=0.02 with cosine decay, critical for small models
+All successful models exhibit **grokking**: prolonged near-zero accuracy followed by a sudden phase transition. For the 456-parameter model, 2 out of 5 random seeds (43 and 44) grokked within 54K steps.
 
 ## Files
 
 ```
 src/
-  model.py    # Low-rank transformer (LowRankLinear, LowRankEmbedding, TinyDecoderLM)
+  model.py    # Low-rank transformer (RMSNorm, shareA_tieKV, LowRankLinear)
   data.py     # Raw digit tokenization pipeline
   train.py    # Training with curriculum learning
   eval.py     # Evaluation and inference
 checkpoints/
-  best_512params.pt   # Best model (512 params, 100% test accuracy)
-  best_582params.pt   # Runner-up (582 params, 100% test accuracy)
-plots/
-  grokking_and_frontier.png  # Training curves and parameter-accuracy frontier
-report.pdf                   # Report with full analysis
+  best_456p_s43.pt   # Best model (456 params, 100% on 100K)
+  best_456p_s44.pt   # 456 params, 99.958% on 100K
+  best_512params.pt  # 512 params, 99.988% on 100K
+  best_582params.pt  # 582 params, 99.999% on 100K
+evaluate_checkpoints.py  # Multi-seed evaluation script
+report.pdf               # Technical report
 ```
 
 ## References
 
-- D. Papailiopoulos, "Glove box challenge: smallest transformer for 10-digit addition," 2026. [GitHub](https://github.com/anadim/smallest-addition-transformer-claude-code)
+- D. Papailiopoulos, "Glove box challenge: smallest transformer for 10-digit addition," 2026. [GitHub](https://github.com/anadim/smallest-addition-transformer-codex)
 - Y. Havinga, "gpt-acc-jax: Smallest GPT for 10-digit addition," 2026. [GitHub](https://github.com/yhavinga/gpt-acc-jax)
+- rezabyt, "digit-addition-491p," 2026. [GitHub](https://github.com/rezabyt/digit-addition-491p)

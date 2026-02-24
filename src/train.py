@@ -34,6 +34,13 @@ from src.eval import evaluate_exact_match
 from src.model import ModelConfig, TinyDecoderLM, count_parameters
 
 
+DTYPE_MAP = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+
+
 @dataclass
 class TrainConfig:
     seed: int
@@ -54,6 +61,7 @@ class TrainConfig:
     best_ckpt_out: str
     last_ckpt_out: str
     device: str
+    dtype: str = "fp32"  # fp32, fp16, bf16
     # Curriculum phases: list of (min_digits, max_digits, steps)
     curriculum: str = ""  # serialized; parsed below
 
@@ -144,6 +152,7 @@ def append_csv(path: Path, row: List) -> None:
 
 def train(model_cfg: ModelConfig, train_cfg: TrainConfig) -> Dict:
     device = torch.device(train_cfg.device)
+    dtype = DTYPE_MAP.get(train_cfg.dtype, torch.float32)
     run_dir = Path(train_cfg.run_dir)
     split_dir = Path(train_cfg.split_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +172,10 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig) -> Dict:
 
     val_a, val_b = splits["val_a"], splits["val_b"]
 
-    model = TinyDecoderLM(model_cfg).to(device)
+    # Mixed precision: model stays fp32, autocast handles fp16/bf16 in forward pass
+    # This keeps optimizer states (AdamW moments) in fp32 for numerical stability
+    use_amp = (dtype != torch.float32 and device.type == "cuda")
+    model = TinyDecoderLM(model_cfg).to(device=device)  # always fp32
     params = count_parameters(model)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
@@ -181,10 +193,14 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig) -> Dict:
     best_step = -1
     t0 = time.time()
 
+    # GradScaler for fp16 (not needed for bf16)
+    use_scaler = (dtype == torch.float16 and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda") if use_scaler else None
+
     print(f"Run: {train_cfg.run_name}")
     print(f"Params: {params}")
     print(f"Model config: {model_cfg}")
-    print(f"Device: {device}")
+    print(f"Device: {device}, amp_dtype: {dtype}, use_amp: {use_amp}, scaler: {use_scaler}")
     print(f"Curriculum: {CURRICULUM_PHASES}")
 
     for step in range(train_cfg.train_steps):
@@ -197,12 +213,28 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig) -> Dict:
         for pg in optimizer.param_groups:
             pg["lr"] = lr_now
 
-        _, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if train_cfg.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
-        optimizer.step()
+        if use_amp:
+            with torch.amp.autocast("cuda", dtype=dtype):
+                _, loss = model(x, y)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if train_cfg.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                if train_cfg.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                optimizer.step()
+        else:
+            _, loss = model(x, y)
+            loss.backward()
+            if train_cfg.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+            optimizer.step()
 
         if (step % train_cfg.eval_interval == 0) or (step == train_cfg.train_steps - 1):
             val_exact, val_tok = evaluate_exact_match(
@@ -267,6 +299,8 @@ def main() -> None:
     p.add_argument("--run-dir", type=Path, default=None)
     p.add_argument("--split-dir", type=Path, default=Path("results/data"))
     p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"],
+                   help="Training precision (fp32, fp16, bf16)")
     p.add_argument("--seed", type=int, default=42)
 
     # model (gpt-acc-jax defaults)
@@ -280,6 +314,14 @@ def main() -> None:
     p.add_argument("--qkv-rank", type=int, default=0, help="QKV projection rank (0=full)")
     p.add_argument("--attn-out-rank", type=int, default=0, help="Attn output rank (0=full)")
     p.add_argument("--ffn-rank", type=int, default=0, help="FFN rank (0=full)")
+    # normalization / tying
+    p.add_argument("--use-rmsnorm", action="store_true", default=False,
+                   help="Use RMSNorm instead of LayerNorm (saves d_model params per norm)")
+    p.add_argument("--tie-qkv", type=str, default="none",
+                   choices=["none", "all", "qk", "kv", "shareA", "shareB",
+                            "shareB_tieQK", "shareB_tieKV", "shareA_tieKV", "shareA_tieQK"],
+                   help="QKV tying mode")
+
 
     # optimization (gpt-acc-jax defaults)
     p.add_argument("--train-steps", type=int, default=27000)
@@ -313,6 +355,8 @@ def main() -> None:
         qkv_rank=args.qkv_rank,
         attn_out_rank=args.attn_out_rank,
         ffn_rank=args.ffn_rank,
+        use_rmsnorm=args.use_rmsnorm,
+        tie_qkv=args.tie_qkv,
     )
 
     run_dir = Path(args.run_dir)
@@ -335,6 +379,7 @@ def main() -> None:
         best_ckpt_out=str(run_dir / "checkpoints" / "best.pt"),
         last_ckpt_out=str(run_dir / "checkpoints" / "last.pt"),
         device=args.device,
+        dtype=args.dtype,
     )
 
     summary = train(model_cfg, train_cfg)
